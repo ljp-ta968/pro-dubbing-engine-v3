@@ -50,7 +50,7 @@ with st.sidebar:
     num_workers = st.slider("Number of Parallel Workers", 1, 10, 5)
     tolerance = st.slider("TTS Duration Tolerance (seconds)", 0.1, 1.0, 0.3, 0.1)
     max_ai_retries = st.slider("Max AI Rewriting Retries", 1, 50, 50) # User requested 50
-    max_rpm = st.slider("Gemini API RPM (Requests Per Minute)", 1, 60, 9) # User requested 9
+    max_rpm = 9 # Hardcoded to 9 RPM as requested by user
     bitrate = st.selectbox("Audio Bitrate", ["96k", "128k", "192k", "256k"], index=2)
 
     if st.button("Initialize Engine"):
