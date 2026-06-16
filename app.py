@@ -2,8 +2,10 @@ import streamlit as st
 import asyncio
 import os
 from dotenv import load_dotenv
+import pandas as pd
 
 from engine.pro_dubbing_engine import ProDubbingEngine
+from engine.models import DubbingSentence
 
 # Load environment variables
 load_dotenv()
@@ -11,16 +13,19 @@ load_dotenv()
 # --- Streamlit UI --- 
 st.set_page_config(layout="wide", page_title="Pro Dubbing Engine V3")
 
-st.title("🎙️ Pro Dubbing Engine Pro V3")
+st.title("🎙️ Pro Dubbing Engine Pro V3 - Multi-Step Workflow")
 
+# Initialize session state variables
 if "engine" not in st.session_state:
     st.session_state.engine = None
 if "step" not in st.session_state:
     st.session_state.step = 1
 if "script_content" not in st.session_state:
     st.session_state.script_content = ""
-if "translated_srt" not in st.session_state:
-    st.session_state.translated_srt = ""
+if "translated_srt_content" not in st.session_state:
+    st.session_state.translated_srt_content = ""
+if "dubbing_sentences" not in st.session_state:
+    st.session_state.dubbing_sentences = []
 if "final_audio_path" not in st.session_state:
     st.session_state.final_audio_path = None
 if "final_srt_content" not in st.session_state:
@@ -56,13 +61,15 @@ with st.sidebar:
                     bitrate=bitrate
                 )
                 st.success("Pro Dubbing Engine Initialized!")
+                st.session_state.step = 1 # Reset to step 1 on re-initialization
 
 # --- Main Content Area ---
 if st.session_state.engine is None:
     st.warning("Please initialize the engine in the sidebar first.")
 else:
+    # Step 1: Script Input & Translation
     if st.session_state.step == 1:
-        st.header("Step 1: Input Script & Translate")
+        st.header("Step 1: Script Input & Translate")
         script_input_method = st.radio("Choose input method:", ("Text Input", "Upload .srt/.txt File"))
 
         if script_input_method == "Text Input":
@@ -77,15 +84,12 @@ else:
             if st.session_state.script_content:
                 with st.spinner("Translating script with Gemini AI..."):
                     try:
-                        # Run the async translation in a synchronous context
-                        result = st.session_state.engine.run_translation_and_processing_sync(
-                            st.session_state.script_content, num_workers
+                        result = st.session_state.engine.run_sync(
+                            st.session_state.engine.translate_script(st.session_state.script_content, num_workers)
                         )
-                        st.session_state.translated_srt = result["final_srt_content"]
-                        st.session_state.final_audio_path = result["final_audio_path"]
-                        st.session_state.final_srt_content = result["final_srt_content"]
-                        st.session_state.step = 2
+                        st.session_state.translated_srt_content = result["reconstructed_srt_content"]
                         st.success("Translation Complete!")
+                        st.session_state.step = 2
                         st.rerun()
                     except Exception as e:
                         st.error(f"Error during translation: {e}")
@@ -93,37 +97,137 @@ else:
             else:
                 st.warning("Please provide script content to translate.")
 
+    # Step 2: Sentence Grouping & Review
     elif st.session_state.step == 2:
-        st.header("Step 2: Review & Download")
-        st.subheader("Translated SRT Content")
-        st.text_area("", value=st.session_state.final_srt_content, height=400)
+        st.header("Step 2: Sentence Grouping & Review")
+        st.subheader("Translated SRT Content (Editable)")
+        st.session_state.translated_srt_content = st.text_area("", value=st.session_state.translated_srt_content, height=400, key="editable_translated_srt")
 
-        col1, col2 = st.columns(2)
-        with col1:
+        if st.button("Group Sentences"):
+            if st.session_state.translated_srt_content:
+                with st.spinner("Grouping sentences..."):
+                    try:
+                        st.session_state.dubbing_sentences = st.session_state.engine.run_sync(
+                            st.session_state.engine.group_sentences(st.session_state.translated_srt_content)
+                        )
+                        st.success(f"Grouped {len(st.session_state.dubbing_sentences)} sentences.")
+                        
+                        # Display grouped sentences for review
+                        sentence_data = []
+                        for sentence in st.session_state.dubbing_sentences:
+                            sentence_data.append({
+                                "ID": sentence.sentence_id,
+                                "Start": f"{sentence.start:.2f}",
+                                "End": f"{sentence.end:.2f}",
+                                "Duration": f"{sentence.duration:.2f}",
+                                "Text": sentence.text
+                            })
+                        st.dataframe(pd.DataFrame(sentence_data), height=300)
+
+                        st.session_state.step = 3
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error during sentence grouping: {e}")
+                        st.exception(e)
+            else:
+                st.warning("Please translate script first.")
+        
+        if st.button("Back to Step 1"):
+            st.session_state.step = 1
+            st.rerun()
+
+    # Step 3: TTS Generation & AI Adjustment
+    elif st.session_state.step == 3:
+        st.header("Step 3: TTS Generation & AI Adjustment")
+        if not st.session_state.dubbing_sentences:
+            st.warning("Please group sentences in Step 2 first.")
+            if st.button("Back to Step 2"):
+                st.session_state.step = 2
+                st.rerun()
+        else:
+            st.info(f"Ready to generate audio for {len(st.session_state.dubbing_sentences)} sentences.")
+            
+            # Placeholder for real-time status updates
+            status_placeholders = {sentence.sentence_id: st.empty() for sentence in st.session_state.dubbing_sentences}
+
+            def update_status_callback(sentence_id, message):
+                if sentence_id in status_placeholders:
+                    status_placeholders[sentence_id].text(f"Sentence {sentence_id}: {message}")
+
+            if st.button("Generate Audio"):
+                with st.spinner("Generating TTS and adjusting with AI..."):
+                    try:
+                        st.session_state.dubbing_sentences = st.session_state.engine.run_sync(
+                            st.session_state.engine.generate_tts_and_adjust(
+                                st.session_state.dubbing_sentences, num_workers, update_status_callback
+                            )
+                        )
+                        st.success("Audio Generation and AI Adjustment Complete!")
+                        st.session_state.step = 4
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"Error during audio generation: {e}")
+                        st.exception(e)
+            
+            if st.button("Back to Step 2"):
+                st.session_state.step = 2
+                st.rerun()
+
+    # Step 4: Final Merging & Download
+    elif st.session_state.step == 4:
+        st.header("Step 4: Final Merging & Download")
+        if not st.session_state.dubbing_sentences:
+            st.warning("Please generate audio in Step 3 first.")
+            if st.button("Back to Step 3"):
+                st.session_state.step = 3
+                st.rerun()
+        else:
+            if st.button("Merge & Finalize"):
+                with st.spinner("Merging audio and generating final SRT..."):
+                    try:
+                        result = st.session_state.engine.run_sync(
+                            st.session_state.engine.merge_and_finalize(st.session_state.dubbing_sentences)
+                        )
+                        st.session_state.final_audio_path = result["final_audio_path"]
+                        st.session_state.final_srt_content = result["final_srt_content"]
+                        st.success("Finalization Complete!")
+                    except Exception as e:
+                        st.error(f"Error during finalization: {e}")
+                        st.exception(e)
+            
             if st.session_state.final_srt_content:
+                st.subheader("Final SRT Content")
+                st.text_area("", value=st.session_state.final_srt_content, height=400, disabled=True)
                 st.download_button(
-                    label="Download Translated SRT",
+                    label="Download Final SRT",
                     data=st.session_state.final_srt_content.encode("utf-8"),
-                    file_name="translated_dubbed.srt",
+                    file_name="final_dubbed.srt",
                     mime="text/plain"
                 )
-        with col2:
+            
             if st.session_state.final_audio_path and os.path.exists(st.session_state.final_audio_path):
+                st.subheader("Final Dubbed Audio")
+                st.audio(st.session_state.final_audio_path, format="audio/mp3")
                 with open(st.session_state.final_audio_path, "rb") as file:
                     st.download_button(
-                        label="Download Dubbed Audio (MP3)",
+                        label="Download Final Audio (MP3)",
                         data=file.read(),
                         file_name="final_dubbed_audio.mp3",
                         mime="audio/mpeg"
                     )
-        
-        if st.button("Start Over"):
-            st.session_state.step = 1
-            st.session_state.script_content = ""
-            st.session_state.translated_srt = ""
-            st.session_state.final_audio_path = None
-            st.session_state.final_srt_content = ""
-            st.rerun()
+            
+            if st.button("Start Over"):
+                st.session_state.step = 1
+                st.session_state.script_content = ""
+                st.session_state.translated_srt_content = ""
+                st.session_state.dubbing_sentences = []
+                st.session_state.final_audio_path = None
+                st.session_state.final_srt_content = ""
+                st.rerun()
+            
+            if st.button("Back to Step 3"):
+                st.session_state.step = 3
+                st.rerun()
 
 # Clean up temporary audio files if any
 # This part might need more robust handling in a real deployment

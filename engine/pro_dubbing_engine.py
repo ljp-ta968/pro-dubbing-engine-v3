@@ -33,10 +33,10 @@ class ProDubbingEngine:
     async def _run_async_in_thread(self, coro):
         return await asyncio.get_event_loop().run_in_executor(self.executor, lambda: asyncio.run(coro))
 
-    async def translate_and_process(self, script_content: str, num_workers: int = 5) -> Dict:
-        # Step 1: Translate
+    async def translate_script(self, script_content: str, num_workers: int = 5) -> Dict:
+        """Step 1: Translate script and reconstruct initial SRT."""
         # Remove timestamps for translation, assuming they are in [HH:MM:SS] format
-        lines_without_timestamps = [l.strip() for l in script_content.split('\n') if l.strip()]
+        lines_without_timestamps = [l.strip() for l in script_content.split("\n") if l.strip()]
         original_segments_for_reconstruction = self.parser.parse_srt(script_content, self.output_language)
 
         translated_text = await self.translator.translate_batch_parallel(
@@ -47,11 +47,11 @@ class ProDubbingEngine:
         reconstructed_srt_content = self.parser.reconstruct_srt_with_translation(
             original_segments_for_reconstruction, translated_text
         )
+        return {"reconstructed_srt_content": reconstructed_srt_content}
 
-        # Step 2: Parse and Group for TTS
-        segments = self.parser.parse_srt(reconstructed_srt_content, self.output_language)
-        # The group_segments_into_sentences now assigns sentence_id to segments
-        # We need to re-parse these segments into actual DubbingSentence objects
+    async def group_sentences(self, srt_content: str) -> List[DubbingSentence]:
+        """Step 2: Parse SRT and group segments into sentences."""
+        segments = self.parser.parse_srt(srt_content, self.output_language)
         segments_with_sentence_ids = self.parser.group_segments_into_sentences(segments)
 
         # Create DubbingSentence objects from grouped segments
@@ -62,14 +62,20 @@ class ProDubbingEngine:
             grouped_sentences[seg.sentence_id].append(seg)
         
         dubbing_sentences = [DubbingSentence(grouped_sentences[sid], sid) for sid in sorted(grouped_sentences.keys())]
+        return dubbing_sentences
 
-        # Step 3: Process TTS and Audio Merging
+    async def generate_tts_and_adjust(self, dubbing_sentences: List[DubbingSentence], num_workers: int = 5, status_callback=None) -> List[DubbingSentence]:
+        """Step 3: Generate TTS, perform AI rewriting and speed adjustment."""
         output_dir = "./temp_audio"
         os.makedirs(output_dir, exist_ok=True)
 
-        tasks = [self.tts_handler.generate_tts_for_sentence(sentence, output_dir) for sentence in dubbing_sentences]
+        tasks = [self.tts_handler.generate_tts_for_sentence(sentence, output_dir, status_callback) for sentence in dubbing_sentences]
         await asyncio.gather(*tasks)
+        
+        return dubbing_sentences
 
+    async def merge_and_finalize(self, dubbing_sentences: List[DubbingSentence]) -> Dict:
+        """Step 4: Merge audio files and generate final SRT content."""
         # Update original segments with adjusted text from sentences
         final_segments = []
         for sentence in dubbing_sentences:
@@ -82,7 +88,7 @@ class ProDubbingEngine:
         final_segments.sort(key=lambda x: x.segment_id)
 
         # Merge all audio files
-        final_audio_path = os.path.join(output_dir, "final_dubbed_audio.mp3")
+        final_audio_path = os.path.join("./temp_audio", "final_dubbed_audio.mp3")
         self.audio_processor.merge_audio_files(final_segments, final_audio_path)
 
         # Generate final SRT content
@@ -94,8 +100,6 @@ class ProDubbingEngine:
             "processed_segments": final_segments
         }
 
-    def run_translation_and_processing_sync(self, script_content: str, num_workers: int = 5) -> Dict:
+    def run_sync(self, coro):
         """Synchronous wrapper for Streamlit compatibility."""
-        return asyncio.run(self.translate_and_process(script_content, num_workers))
-
-
+        return asyncio.run(coro)
